@@ -112,7 +112,7 @@ def fetch_sora_from_mas_legacy(years_back=10):
             f"&between[end_of_day]={start},{end}"
         )
         try:
-            res = requests.get(url, headers=HEADERS, timeout=15)
+            res = requests.get(url, headers=HEADERS, timeout=30)  # bumped for one diagnostic test — see notes
             if res.status_code != 200:
                 log(f"SORA chunk {start}..{end}: HTTP {res.status_code}")
                 continue
@@ -214,3 +214,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
