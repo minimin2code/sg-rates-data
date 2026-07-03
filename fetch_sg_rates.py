@@ -40,6 +40,7 @@ WHAT TO CHECK/UPDATE
 import json
 import os
 import sys
+import time
 from datetime import date, datetime, timezone
 
 import requests
@@ -86,13 +87,23 @@ def merge_records(existing_list, new_records):
 
 def fetch_sora_from_mas_legacy(years_back=10):
     """Attempts the legacy CKAN datastore endpoint for SORA. Chunked by
-    ~2-year windows (MAS caps records per request)."""
+    ~2-year windows (MAS caps records per request).
+
+    Requests are deliberately spaced out (see time.sleep below): a prior
+    run showed inconsistent behavior across 5 near-simultaneous requests
+    to the same host (some fast-empty-200, one ReadTimeout) — a pattern
+    consistent with rate-limiting/anti-bot throttling reacting to a burst
+    of requests, rather than a permanently dead endpoint. Spacing them out
+    tests that theory directly."""
     today = date.today()
     chunk_years = 2
     n_chunks = max(1, -(-years_back // chunk_years))
     records = []
 
     for i in range(n_chunks):
+        if i > 0:
+            time.sleep(5)  # be polite; avoid looking like a burst scraper
+
         end = today.replace(year=today.year - i * chunk_years)
         start = today.replace(year=max(today.year - (i + 1) * chunk_years, today.year - years_back))
         url = (
