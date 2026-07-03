@@ -1,0 +1,20 @@
+{
+  "updated_at": "2026-07-03T10:30:29.154037+00:00",
+  "series": {
+    "sora": [],
+    "sgs_2y": [
+      {
+        "date": "2026-06-24",
+        "value": 1.59,
+        "source": "manual"
+      }
+    ],
+    "sgs_10y": [
+      {
+        "date": "2026-06-29",
+        "value": 2.04,
+        "source": "manual"
+      }
+    ]
+  }
+}
