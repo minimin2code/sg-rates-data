@@ -118,7 +118,19 @@ def fetch_sora_from_mas_legacy(years_back=10):
         except requests.exceptions.RequestException as e:
             log(f"SORA chunk {start}..{end}: {type(e).__name__}: {e}")
         except (ValueError, KeyError) as e:
-            log(f"SORA chunk {start}..{end}: parse error: {e}")
+            # Got a 200 but the body wasn't valid JSON. Log everything
+            # needed to diagnose why: were we redirected somewhere else
+            # (e.g. to the new apimg-portal)? What content-type came back?
+            # What does the body actually look like?
+            redirect_chain = " -> ".join(r.url for r in res.history) if res.history else "(no redirect)"
+            content_type = res.headers.get("Content-Type", "(none)")
+            body_snippet = res.text[:300].replace("\n", " ")
+            log(
+                f"SORA chunk {start}..{end}: {type(e).__name__}: {e} | "
+                f"final_url={res.url} | redirects={redirect_chain} | "
+                f"content-type={content_type} | body_len={len(res.text)} | "
+                f"body_snippet={body_snippet!r}"
+            )
 
     return records
 
