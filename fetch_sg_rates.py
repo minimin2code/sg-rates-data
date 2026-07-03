@@ -86,15 +86,68 @@ def merge_records(existing_list, new_records):
 
 
 def fetch_sora_from_mas_legacy(years_back=10):
-    """Attempts the legacy CKAN datastore endpoint for SORA. Chunked by
-    ~2-year windows (MAS caps records per request).
+    """Attempts the legacy CKAN datastore endpoint for SORA.
 
-    Requests are deliberately spaced out (see time.sleep below): a prior
-    run showed inconsistent behavior across 5 near-simultaneous requests
-    to the same host (some fast-empty-200, one ReadTimeout) — a pattern
-    consistent with rate-limiting/anti-bot throttling reacting to a burst
-    of requests, rather than a permanently dead endpoint. Spacing them out
-    tests that theory directly."""
+    CONCLUSION FROM TESTING (2026-07-03): three separate test runs — rapid
+    requests, 5s-spaced requests, and a 30s timeout — all consistently
+    returned HTTP 200 with an empty/invalid (non-JSON) body in ~11s. This
+    rules out slowness, rate-limiting, and connectivity issues; the
+    endpoint is very likely genuinely decommissioned (MAS announced a
+    deprecation of this API in Oct 2023 in favour of a new subscription
+    API Catalog — see MAS_API_KEY below).
+
+    Given that, this function now only makes ONE quick canary request
+    (not 5 full historical chunks) so the daily job doesn't burn ~2.5
+    minutes chasing a dead endpoint. If MAS ever restores it, this will
+    detect that (returns real records) and you can restore full chunked
+    backfill by increasing years_back usage / re-adding the loop.
+    """
+    today = date.today()
+    start = today.replace(year=today.year - 1)  # just probe the last year
+    url = (
+        "https://eservices.mas.gov.sg/api/action/datastore/search.json"
+        f"?resource_id={SORA_RESOURCE_ID}&limit=1000"
+        f"&between[end_of_day]={start},{today}"
+    )
+    records = []
+
+    try:
+        res = requests.get(url, headers=HEADERS, timeout=15)
+        if res.status_code != 200:
+            log(f"SORA canary check: HTTP {res.status_code} — still not working")
+            return records
+        chunk_records = res.json().get("result", {}).get("records", [])
+        if chunk_records:
+            log(f"SORA canary check: SUCCESS — {len(chunk_records)} records! "
+                f"Endpoint appears to be working again — consider restoring full chunked backfill.")
+        else:
+            log("SORA canary check: got valid JSON but zero records")
+        for rec in chunk_records:
+            rate_col = next((c for c in ("sora", "SORA", "rate_sora") if c in rec), None)
+            if rate_col and rec.get("end_of_day"):
+                records.append({
+                    "date": rec["end_of_day"],
+                    "value": float(rec[rate_col]),
+                    "source": "mas_api",
+                })
+    except requests.exceptions.RequestException as e:
+        log(f"SORA canary check: {type(e).__name__}: {e}")
+    except (ValueError, KeyError) as e:
+        content_type = res.headers.get("Content-Type", "(none)")
+        body_snippet = res.text[:300].replace("\n", " ")
+        log(
+            f"SORA canary check: {type(e).__name__}: {e} | "
+            f"content-type={content_type} | body_len={len(res.text)} | "
+            f"body_snippet={body_snippet!r} — still not working, as expected"
+        )
+
+    return records
+
+
+def _fetch_sora_from_mas_legacy_full_chunked_UNUSED(years_back=10):
+    """Kept for reference / easy restoration if MAS's endpoint ever comes
+    back. Not called anywhere currently — see fetch_sora_from_mas_legacy's
+    docstring for why this was scaled down to a single canary request."""
     today = date.today()
     chunk_years = 2
     n_chunks = max(1, -(-years_back // chunk_years))
