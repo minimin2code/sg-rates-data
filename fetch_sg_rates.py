@@ -50,9 +50,13 @@ OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sg_rates
 SORA_RESOURCE_ID = "9a0bf149-308c-4bd2-832d-76c8e6cb47ed"  # legacy CKAN, may be deprecated
 MAS_API_KEY = os.environ.get("MAS_API_KEY")  # set as a GitHub Actions secret once you have one
 
-# Manually-curated fallback values, used only when live fetches return
-# nothing. Update these every so often — they are NOT auto-refreshed.
-# Values as of the dates shown, sourced from TradingEconomics.
+# Manually-curated fallback VALUES, used only when live fetches return
+# nothing. The "date" here is just documentation of when YOU last checked
+# the value below — the actual published record gets stamped with today's
+# date automatically each run (see apply_manual_override), so history
+# accumulates on its own. You only need to update the "value" (and this
+# "date" comment, for your own reference) when the real rate changes —
+# e.g. by checking https://tradingeconomics.com/singapore/2-year-bond-yield
 MANUAL_OVERRIDES = {
     "sgs_2y": {"date": "2026-06-24", "value": 1.59},
     "sgs_10y": {"date": "2026-06-29", "value": 2.04},
@@ -221,14 +225,20 @@ def fetch_sgs_yields_from_mas_api():
 
 
 def apply_manual_override(key, live_records):
-    """If live fetch produced nothing, fall back to the single manually
-    curated data point so the app has something to show (clearly tagged)."""
+    """If live fetch produced nothing, fall back to the manually curated
+    reference VALUE, but stamp it with TODAY's date rather than a fixed
+    date. Since merge_records dedupes by date, this means each daily run
+    adds one new point (a "flat line" at the same value) automatically —
+    building real accumulating history with zero manual date-editing.
+    Only the VALUE needs manual updating (in MANUAL_OVERRIDES below) when
+    the actual rate changes; the date takes care of itself."""
     if live_records:
         return live_records
     override = MANUAL_OVERRIDES.get(key)
     if not override:
         return []
-    return [{"date": override["date"], "value": override["value"], "source": "manual"}]
+    today_str = date.today().isoformat()
+    return [{"date": today_str, "value": override["value"], "source": "manual"}]
 
 
 def main():
