@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-07-09T05:38:47.759926+00:00",
+  "updated_at": "2026-07-10T05:35:00.709937+00:00",
   "series": {
     "sora": [],
     "sgs_2y": [
@@ -22,6 +22,11 @@
         "date": "2026-07-09",
         "value": 1.59,
         "source": "manual"
+      },
+      {
+        "date": "2026-07-10",
+        "value": 1.59,
+        "source": "manual"
       }
     ],
     "sgs_10y": [
@@ -42,6 +47,11 @@
       },
       {
         "date": "2026-07-09",
+        "value": 2.04,
+        "source": "manual"
+      },
+      {
+        "date": "2026-07-10",
         "value": 2.04,
         "source": "manual"
       }
