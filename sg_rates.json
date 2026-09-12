@@ -12860,16 +12860,6 @@
         "source": "mas_page_scrape"
       },
       {
-        "date": "2026-09-05",
-        "value": 1.59,
-        "source": "manual"
-      },
-      {
-        "date": "2026-09-06",
-        "value": 1.59,
-        "source": "manual"
-      },
-      {
         "date": "2026-09-07",
         "value": 1.7,
         "source": "mas_page_scrape"
@@ -12893,11 +12883,6 @@
         "date": "2026-09-11",
         "value": 1.78,
         "source": "mas_page_scrape"
-      },
-      {
-        "date": "2026-09-12",
-        "value": 1.59,
-        "source": "manual"
       }
     ],
     "sgs_10y": [
@@ -13207,16 +13192,6 @@
         "source": "mas_page_scrape"
       },
       {
-        "date": "2026-09-05",
-        "value": 2.04,
-        "source": "manual"
-      },
-      {
-        "date": "2026-09-06",
-        "value": 2.04,
-        "source": "manual"
-      },
-      {
         "date": "2026-09-07",
         "value": 2.37,
         "source": "mas_page_scrape"
@@ -13240,11 +13215,6 @@
         "date": "2026-09-11",
         "value": 2.46,
         "source": "mas_page_scrape"
-      },
-      {
-        "date": "2026-09-12",
-        "value": 2.04,
-        "source": "manual"
       }
     ]
   }
