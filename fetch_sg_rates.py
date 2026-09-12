@@ -239,19 +239,36 @@ def fetch_sgs_yields_from_mas_page():
         return [], []
 
 
-def apply_manual_override(key, live_records):
-    """If the live fetch produced nothing, fall back to the manually
-    curated reference VALUE, stamped with TODAY's date. Since
-    merge_records dedupes by date, this means each daily run adds one new
-    point automatically. Only used when fetch_sgs_yields_from_mas_page()
-    returns empty (page down, redesigned, etc) — under normal operation
-    this should rarely fire."""
+def apply_manual_override(key, live_records, existing_records):
+    """If the live fetch produced nothing, decide what (if anything) to
+    write for today:
+    - Live fetch succeeded -> use those records, as before.
+    - Live fetch failed AND we already have real history for this series
+      -> return [] (write nothing). A transient failure should never
+      inject a placeholder dated "today" that could sort after, and
+      therefore outrank, the last real data point when the app picks
+      the most recent value. This is what happened on 2026-09-12: a
+      failed run stamped a fallback with that date, and it silently
+      became "current" ahead of the real 2026-09-11 figure until
+      manually removed.
+    - Live fetch failed AND we have NO history at all for this series
+      (true cold start, e.g. first-ever run before the scraper existed)
+      -> fall back to the manually curated reference VALUE, stamped
+      with today's date, so the app has *something* to show rather
+      than a totally empty series.
+    """
     if live_records:
         return live_records
+    if existing_records:
+        log(f"{key}: live fetch failed, but existing history is present — "
+            f"writing nothing this run rather than a placeholder")
+        return []
     override = MANUAL_OVERRIDES.get(key)
     if not override:
         return []
     today_str = date.today().isoformat()
+    log(f"{key}: no existing history and live fetch failed — using manual "
+        f"fallback value for cold start")
     return [{"date": today_str, "value": override["value"], "source": "manual"}]
 
 
@@ -267,8 +284,8 @@ def main():
 
     log("Fetching SGS 2Y / 10Y yields...")
     sgs_2y_records, sgs_10y_records = fetch_sgs_yields_from_mas_page()
-    sgs_2y_records = apply_manual_override("sgs_2y", sgs_2y_records)
-    sgs_10y_records = apply_manual_override("sgs_10y", sgs_10y_records)
+    sgs_2y_records = apply_manual_override("sgs_2y", sgs_2y_records, data["series"]["sgs_2y"])
+    sgs_10y_records = apply_manual_override("sgs_10y", sgs_10y_records, data["series"]["sgs_10y"])
     data["series"]["sgs_2y"] = merge_records(data["series"]["sgs_2y"], sgs_2y_records)
     data["series"]["sgs_10y"] = merge_records(data["series"]["sgs_10y"], sgs_10y_records)
 
