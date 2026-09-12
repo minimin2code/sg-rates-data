@@ -3,60 +3,78 @@ Daily collector for Singapore rate data (SORA, SGS 2Y/10Y bond yields).
 
 WHY THIS EXISTS
 ----------------
-MAS's data endpoints (eservices.mas.gov.sg) return ConnectionError when
-called from certain cloud hosting environments (e.g. Hugging Face Spaces).
-This is very likely because MAS deprecated its old public CKAN-style API
-in October 2023 in favour of a new subscription-based "API Catalog"
-(https://eservices.mas.gov.sg/apimg-portal/), and/or blocks non-Singapore
-datacenter IP ranges outright.
+MAS's old public CKAN-style API (eservices.mas.gov.sg/api/action/datastore/
+search.json) is decommissioned — confirmed via repeated live testing (see
+git history of this file for the earlier canary-check function and its
+findings). This script now uses two DIFFERENT live sources instead:
 
-This script is designed to run on a DIFFERENT network (GitHub Actions,
-scheduled daily via cron) and publish the results as a JSON file committed
-back to this repo. The Gradio app then reads that JSON via its raw
-GitHub URL — a request GitHub's CDN serves reliably from anywhere,
-sidestepping whatever is blocking direct MAS access from the app's host.
+1. SORA: MAS's new subscription API Catalog ("API for Domestic Interest
+   Rates - Daily"). Requires a free MAS_API_KEY (see README / repo secrets
+   for how this is set as a GitHub Actions secret). Auth is via a `KeyId`
+   header — NOT `Authorization: Bearer` — confirmed working via Swagger's
+   "Try it out" against real MAS data.
 
-WHAT TO CHECK/UPDATE
----------------------
-1. SORA: attempts the legacy CKAN endpoint (resource_id below). This may
-   or may not still work — deprecated does not always mean shut off
-   immediately. Check the Actions log after the first run.
-2. SGS 2Y / 10Y bond yields: no confirmed free keyless JSON endpoint was
-   found for these at the time this script was written. Until a real
-   endpoint is wired in, this script carries forward a manually-curated
-   reference value (see MANUAL_OVERRIDES below) so the app has *something*
-   to show, clearly tagged "source": "manual" so it's never confused with
-   live data. If you register for MAS's new API Catalog
-   (https://eservices.mas.gov.sg/apimg-portal/api-catalog) and find the
-   correct resource ID / endpoint for SGS Benchmark Yields, plug it into
-   fetch_sgs_yields_from_mas_api() below and this will switch over
-   automatically (manual values are only used as a fallback when the live
-   fetch returns nothing).
-3. Update MANUAL_OVERRIDES periodically (e.g. monthly) by checking a
-   source like https://tradingeconomics.com/singapore/2-year-bond-yield
-   or MAS's own published SGS pages directly in a browser.
+2. SGS 2Y/10Y Benchmark Yields: no equivalent API Catalog endpoint exists
+   for these (manually searched, not found) — but MAS's own
+   SgsBenchmarkIssuePrices.aspx page renders its "Closing Levels" table as
+   plain server-side HTML on a bare GET request (confirmed by inspection:
+   no JS/AJAX needed), and conveniently defaults to showing the trailing
+   ~1 week of business days with no parameters required. This script
+   scrapes that table directly.
+
+This script is designed to run on a DIFFERENT network from the main app
+(GitHub Actions, scheduled daily via cron) and publish the results as a
+JSON file committed back to this repo. The Gradio app then reads that
+JSON via its raw GitHub URL.
+
+WHAT TO CHECK / MAINTAIN
+--------------------------
+- SORA: if MAS_API_KEY expires, is revoked, or the API Catalog changes
+  its auth scheme, fetch_sora_from_mas_api_catalog() will start logging
+  HTTP errors — check Action logs.
+- SGS yields: this is a page scrape, not an API — the MOST likely future
+  break is MAS redesigning SgsBenchmarkIssuePrices.aspx (new column
+  order, renamed heading, JS-rendered table, etc). fetch_sgs_yields_from_
+  mas_page() logs specifically when the page structure doesn't match
+  what's expected, rather than failing silently, to make that visible
+  fast. If it does break, MANUAL_OVERRIDES below is used as a fallback
+  so the app always has *something* to show — those fallback points are
+  tagged "source": "manual" (as opposed to "mas_page_scrape") so
+  downstream consumers can tell real scraped data from the placeholder.
+- Update MANUAL_OVERRIDES periodically (e.g. monthly) by checking
+  https://tradingeconomics.com/singapore/2-year-bond-yield or MAS's own
+  page directly in a browser, in case the scraper is ever down for a
+  stretch.
 """
 
 import json
 import os
+import re
 import sys
-import time
 from datetime import date, datetime, timezone
 
 import requests
+from bs4 import BeautifulSoup
 
 OUTPUT_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sg_rates.json")
 
-SORA_RESOURCE_ID = "9a0bf149-308c-4bd2-832d-76c8e6cb47ed"  # legacy CKAN, may be deprecated
-MAS_API_KEY = os.environ.get("MAS_API_KEY")  # set as a GitHub Actions secret once you have one
+MAS_API_KEY = os.environ.get("MAS_API_KEY")  # set as a GitHub Actions secret
 
-# Manually-curated fallback VALUES, used only when live fetches return
-# nothing. The "date" here is just documentation of when YOU last checked
-# the value below — the actual published record gets stamped with today's
-# date automatically each run (see apply_manual_override), so history
-# accumulates on its own. You only need to update the "value" (and this
-# "date" comment, for your own reference) when the real rate changes —
-# e.g. by checking https://tradingeconomics.com/singapore/2-year-bond-yield
+MAS_SORA_API_URL = (
+    "https://eservices.mas.gov.sg/apimg-gw/server/monthly_statistical_bulletin_non610mssql/"
+    "domestic_interest_rates_daily/views/domestic_interest_rates_daily"
+)
+MAS_SGS_PRICES_URL = "https://eservices.mas.gov.sg/statistics/fdanet/SgsBenchmarkIssuePrices.aspx"
+
+_DATE_ROW_RE = re.compile(r"^\d{2} \w{3} \d{4}$")
+
+# Manually-curated fallback VALUES, used only when the SGS page scrape
+# returns nothing (page down, redesigned, etc). The "date" here is just
+# documentation of when YOU last checked the value below — the actual
+# published record gets stamped with today's date automatically each run
+# (see apply_manual_override), so history accumulates on its own. You only
+# need to update the "value" (and this "date" comment, for reference) when
+# checking a source like https://tradingeconomics.com/singapore/2-year-bond-yield
 MANUAL_OVERRIDES = {
     "sgs_2y": {"date": "2026-06-24", "value": 1.59},
     "sgs_10y": {"date": "2026-06-29", "value": 2.04},
@@ -89,149 +107,145 @@ def merge_records(existing_list, new_records):
     return sorted(by_date.values(), key=lambda r: r["date"])
 
 
-def fetch_sora_from_mas_legacy(years_back=10):
-    """Attempts the legacy CKAN datastore endpoint for SORA.
-
-    CONCLUSION FROM TESTING (2026-07-03): three separate test runs — rapid
-    requests, 5s-spaced requests, and a 30s timeout — all consistently
-    returned HTTP 200 with an empty/invalid (non-JSON) body in ~11s. This
-    rules out slowness, rate-limiting, and connectivity issues; the
-    endpoint is very likely genuinely decommissioned (MAS announced a
-    deprecation of this API in Oct 2023 in favour of a new subscription
-    API Catalog — see MAS_API_KEY below).
-
-    Given that, this function now only makes ONE quick canary request
-    (not 5 full historical chunks) so the daily job doesn't burn ~2.5
-    minutes chasing a dead endpoint. If MAS ever restores it, this will
-    detect that (returns real records) and you can restore full chunked
-    backfill by increasing years_back usage / re-adding the loop.
+def fetch_sora_from_mas_api_catalog(years_back=10):
+    """Fetches SORA history from MAS's API Catalog ("API for Domestic
+    Interest Rates - Daily"). Auth confirmed via Swagger "Authorize":
+    header name is `KeyId`, value is the raw API key. Response shape
+    confirmed: {"name": ..., "elements": [ {...}, ... ]}. `sora` can be
+    null for the current day if it hasn't been published yet — filter
+    those out rather than treating them as errors.
     """
-    today = date.today()
-    start = today.replace(year=today.year - 1)  # just probe the last year
-    url = (
-        "https://eservices.mas.gov.sg/api/action/datastore/search.json"
-        f"?resource_id={SORA_RESOURCE_ID}&limit=1000"
-        f"&between[end_of_day]={start},{today}"
-    )
-    records = []
+    if not MAS_API_KEY:
+        log("SORA: MAS_API_KEY not set, skipping live fetch")
+        return []
 
+    today = date.today()
+    start = today.replace(year=today.year - years_back)
+
+    params = {
+        "$filter": f"end_of_day>='{start.isoformat()}' AND end_of_day<='{today.isoformat()}'",
+        "$orderby": "end_of_day ASC",
+        "$select": "end_of_day,sora",
+        "$count": 5000,
+    }
+    headers = {
+        **HEADERS,
+        "KeyId": MAS_API_KEY,
+    }
+
+    records = []
     try:
-        res = requests.get(url, headers=HEADERS, timeout=15)
+        res = requests.get(MAS_SORA_API_URL, headers=headers, params=params, timeout=20)
+        if res.status_code == 204:
+            log("SORA: HTTP 204 — no results for this filter")
+            return []
         if res.status_code != 200:
-            log(f"SORA canary check: HTTP {res.status_code} — still not working")
-            return records
-        chunk_records = res.json().get("result", {}).get("records", [])
-        if chunk_records:
-            log(f"SORA canary check: SUCCESS — {len(chunk_records)} records! "
-                f"Endpoint appears to be working again — consider restoring full chunked backfill.")
-        else:
-            log("SORA canary check: got valid JSON but zero records")
-        for rec in chunk_records:
-            rate_col = next((c for c in ("sora", "SORA", "rate_sora") if c in rec), None)
-            if rate_col and rec.get("end_of_day"):
+            log(f"SORA: HTTP {res.status_code} — {res.text[:300]!r}")
+            return []
+
+        rows = res.json().get("elements", [])
+        for row in rows:
+            if row.get("sora") is not None and row.get("end_of_day"):
                 records.append({
-                    "date": rec["end_of_day"],
-                    "value": float(rec[rate_col]),
+                    "date": row["end_of_day"][:10],
+                    "value": float(row["sora"]),
                     "source": "mas_api",
                 })
+        log(f"SORA: fetched {len(records)} records from API Catalog "
+            f"({len(rows) - len(records)} skipped as null/unpublished)")
+
     except requests.exceptions.RequestException as e:
-        log(f"SORA canary check: {type(e).__name__}: {e}")
-    except (ValueError, KeyError) as e:
-        content_type = res.headers.get("Content-Type", "(none)")
-        body_snippet = res.text[:300].replace("\n", " ")
-        log(
-            f"SORA canary check: {type(e).__name__}: {e} | "
-            f"content-type={content_type} | body_len={len(res.text)} | "
-            f"body_snippet={body_snippet!r} — still not working, as expected"
-        )
+        log(f"SORA: {type(e).__name__}: {e}")
+    except (ValueError, KeyError, TypeError) as e:
+        log(f"SORA: {type(e).__name__}: {e} | body_snippet={res.text[:300]!r}")
 
     return records
 
 
-def _fetch_sora_from_mas_legacy_full_chunked_UNUSED(years_back=10):
-    """Kept for reference / easy restoration if MAS's endpoint ever comes
-    back. Not called anywhere currently — see fetch_sora_from_mas_legacy's
-    docstring for why this was scaled down to a single canary request."""
-    today = date.today()
-    chunk_years = 2
-    n_chunks = max(1, -(-years_back // chunk_years))
-    records = []
+def fetch_sgs_yields_from_mas_page():
+    """Scrapes 2Y/10Y SGS benchmark yields from MAS's
+    SgsBenchmarkIssuePrices.aspx page's "Closing Levels" table.
 
-    for i in range(n_chunks):
-        if i > 0:
-            time.sleep(5)  # be polite; avoid looking like a burst scraper
+    Column layout after the date (verified against a known-good external
+    reference for 10 Sep 2026, which matched exactly):
+    6M-Yield, 1Y-Yield, 2Y-Price, 2Y-Yield, 5Y-Price, 5Y-Yield,
+    10Y-Price, 10Y-Yield, 15Y-Price, 15Y-Yield, 20Y-Price, 20Y-Yield,
+    30Y-Price, 30Y-Yield, 50Y-Price, 50Y-Yield.
 
-        end = today.replace(year=today.year - i * chunk_years)
-        start = today.replace(year=max(today.year - (i + 1) * chunk_years, today.year - years_back))
-        url = (
-            "https://eservices.mas.gov.sg/api/action/datastore/search.json"
-            f"?resource_id={SORA_RESOURCE_ID}&limit=1000"
-            f"&between[end_of_day]={start},{end}"
-        )
-        try:
-            res = requests.get(url, headers=HEADERS, timeout=30)  # bumped for one diagnostic test — see notes
-            if res.status_code != 200:
-                log(f"SORA chunk {start}..{end}: HTTP {res.status_code}")
+    Uses BeautifulSoup + fixed column positions rather than
+    pandas.read_html(), since the table's header spans three rows with
+    rowspan/colspan that read_html tends to mis-align. Instead this scans
+    every <tr> and treats any row whose first cell matches a date pattern
+    (e.g. "11 Sep 2026") as a data row, skipping header rows entirely
+    without needing to parse them.
+    """
+    try:
+        res = requests.get(MAS_SGS_PRICES_URL, headers=HEADERS, timeout=20)
+        if res.status_code != 200:
+            log(f"SGS yields (page scrape): HTTP {res.status_code}")
+            return [], []
+
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        # Anchor on the "Closing Levels" heading, then take the next
+        # <table> after it — distinct from the "High / Low Levels" table
+        # further down the same page.
+        heading = soup.find(string=re.compile("Closing Levels", re.IGNORECASE))
+        if heading is None:
+            log("SGS yields (page scrape): 'Closing Levels' heading not found — page structure may have changed")
+            return [], []
+
+        table = heading.find_next("table")
+        if table is None:
+            log("SGS yields (page scrape): no <table> found after 'Closing Levels' heading")
+            return [], []
+
+        sgs_2y_records = []
+        sgs_10y_records = []
+
+        for row in table.find_all("tr"):
+            cells = [c.get_text(strip=True) for c in row.find_all(["td", "th"])]
+            if not cells or not _DATE_ROW_RE.match(cells[0]):
+                continue  # header row, or a row with a different shape — skip
+
+            values = cells[1:]
+            if len(values) < 8:
+                log(f"SGS yields (page scrape): row for {cells[0]} has only "
+                    f"{len(values)} value columns (expected >=8) — skipping, "
+                    f"page layout may have changed")
                 continue
-            chunk_records = res.json().get("result", {}).get("records", [])
-            log(f"SORA chunk {start}..{end}: {len(chunk_records)} records")
-            for rec in chunk_records:
-                rate_col = next((c for c in ("sora", "SORA", "rate_sora") if c in rec), None)
-                if rate_col and rec.get("end_of_day"):
-                    records.append({
-                        "date": rec["end_of_day"],
-                        "value": float(rec[rate_col]),
-                        "source": "mas_api",
-                    })
-        except requests.exceptions.RequestException as e:
-            log(f"SORA chunk {start}..{end}: {type(e).__name__}: {e}")
-        except (ValueError, KeyError) as e:
-            # Got a 200 but the body wasn't valid JSON. Log everything
-            # needed to diagnose why: were we redirected somewhere else
-            # (e.g. to the new apimg-portal)? What content-type came back?
-            # What does the body actually look like?
-            redirect_chain = " -> ".join(r.url for r in res.history) if res.history else "(no redirect)"
-            content_type = res.headers.get("Content-Type", "(none)")
-            body_snippet = res.text[:300].replace("\n", " ")
-            log(
-                f"SORA chunk {start}..{end}: {type(e).__name__}: {e} | "
-                f"final_url={res.url} | redirects={redirect_chain} | "
-                f"content-type={content_type} | body_len={len(res.text)} | "
-                f"body_snippet={body_snippet!r}"
-            )
 
-    return records
+            try:
+                iso_date = datetime.strptime(cells[0], "%d %b %Y").date().isoformat()
+                sgs_2y_records.append({
+                    "date": iso_date,
+                    "value": float(values[3]),  # 2Y-Yield
+                    "source": "mas_page_scrape",
+                })
+                sgs_10y_records.append({
+                    "date": iso_date,
+                    "value": float(values[7]),  # 10Y-Yield
+                    "source": "mas_page_scrape",
+                })
+            except (ValueError, IndexError) as e:
+                log(f"SGS yields (page scrape): couldn't parse row for {cells[0]}: {e}")
+                continue
 
+        log(f"SGS yields (page scrape): parsed {len(sgs_2y_records)} rows")
+        return sgs_2y_records, sgs_10y_records
 
-def fetch_sgs_yields_from_mas_api():
-    """PLACEHOLDER for MAS's new API Catalog (apimg-portal). No confirmed
-    endpoint was available when this script was written. Once you have
-    registered and found the correct resource/endpoint for SGS Benchmark
-    Yields, implement the real request here. Until then this always
-    returns empty lists, and MANUAL_OVERRIDES is used instead."""
-    if not MAS_API_KEY:
-        log("SGS yields: MAS_API_KEY not set, skipping live fetch (using manual override)")
+    except requests.exceptions.RequestException as e:
+        log(f"SGS yields (page scrape): {type(e).__name__}: {e}")
         return [], []
-
-    # --- TODO: replace with the real endpoint once you have it ---
-    # Example shape once you know the endpoint:
-    # res = requests.get(
-    #     "https://eservices.mas.gov.sg/apimg-portal/api/<real-path>",
-    #     headers={**HEADERS, "Authorization": f"Bearer {MAS_API_KEY}"},
-    #     timeout=15,
-    # )
-    log("SGS yields: MAS API endpoint not yet configured (see TODO in script)")
-    return [], []
 
 
 def apply_manual_override(key, live_records):
-    """If live fetch produced nothing, fall back to the manually curated
-    reference VALUE, but stamp it with TODAY's date rather than a fixed
-    date. Since merge_records dedupes by date, this means each daily run
-    adds one new point (a "flat line" at the same value) automatically —
-    building real accumulating history with zero manual date-editing.
-    Only the VALUE needs manual updating (in MANUAL_OVERRIDES below) when
-    the actual rate changes; the date takes care of itself."""
+    """If the live fetch produced nothing, fall back to the manually
+    curated reference VALUE, stamped with TODAY's date. Since
+    merge_records dedupes by date, this means each daily run adds one new
+    point automatically. Only used when fetch_sgs_yields_from_mas_page()
+    returns empty (page down, redesigned, etc) — under normal operation
+    this should rarely fire."""
     if live_records:
         return live_records
     override = MANUAL_OVERRIDES.get(key)
@@ -245,14 +259,14 @@ def main():
     data = load_existing()
 
     log("Fetching SORA...")
-    sora_records = fetch_sora_from_mas_legacy()
+    sora_records = fetch_sora_from_mas_api_catalog()
     if sora_records:
         data["series"]["sora"] = merge_records(data["series"]["sora"], sora_records)
     else:
         log("SORA: no live records obtained this run (keeping existing history, if any)")
 
     log("Fetching SGS 2Y / 10Y yields...")
-    sgs_2y_records, sgs_10y_records = fetch_sgs_yields_from_mas_api()
+    sgs_2y_records, sgs_10y_records = fetch_sgs_yields_from_mas_page()
     sgs_2y_records = apply_manual_override("sgs_2y", sgs_2y_records)
     sgs_10y_records = apply_manual_override("sgs_10y", sgs_10y_records)
     data["series"]["sgs_2y"] = merge_records(data["series"]["sgs_2y"], sgs_2y_records)
