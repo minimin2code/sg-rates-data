@@ -263,10 +263,14 @@ def fetch_sgs_yields_from_mas_page():
 def fetch_ssb_rates_from_mas_page(year=None, month=None):
     """Fetches the Singapore Savings Bond (SSB) step-up interest rate
     table (Year 1 through 10) for a given year/month's issue — defaults
-    to today's year/month, which is exactly the "current month's issue"
-    behavior requested: if this runs in October, it naturally asks for
-    October's issue instead of September's, since it just reads today's
-    date rather than anything hardcoded.
+    to the issue dated the 1st of NEXT calendar month, which is the one
+    "currently open for application" as of today (see the year/month
+    computation below for why: MAS's own mapping, confirmed against the
+    auctions-and-issuance-calendar page, is month-of-announcement ->
+    issue dated 1st of the FOLLOWING month). This naturally rolls forward
+    correctly regardless of which month the script runs in — no
+    per-month special-casing needed, since it's always "whichever month
+    comes after today."
 
     Unlike fetch_sgs_yields_from_mas_page (a plain GET that returns
     server-rendered HTML directly), this page is classic ASP.NET WebForms:
@@ -296,8 +300,19 @@ def fetch_ssb_rates_from_mas_page(year=None, month=None):
       Issue Date, Coupon Dates, and Maturity Date labels/values.
     """
     if year is None or month is None:
+        # SSB issues are announced on the 1st business day of month M, but
+        # the bond announced is dated the 1st of month M+1 — e.g. querying
+        # in September surfaces the issue dated 1 October (confirmed
+        # directly: the auctions-and-issuance-calendar page, when browsed
+        # in September, links to issue_code=GX26100Z&issue_date=2026-10-01,
+        # not a September-dated issue). So "this month's" SSB, in the
+        # sense of "the one currently open for application," is next
+        # calendar month's issue, not this one.
         today = date.today()
-        year, month = today.year, today.month
+        year, month = today.year, today.month + 1
+        if month > 12:
+            month = 1
+            year += 1
 
     session = requests.Session()
     session.headers.update(HEADERS)
@@ -586,5 +601,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
