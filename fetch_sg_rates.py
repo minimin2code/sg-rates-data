@@ -382,6 +382,31 @@ def fetch_ssb_rates_from_mas_page(year=None, month=None):
             # table's date format ever changes — still dedupes/sorts sanely.
             issue_date_iso = date(year, month, 1).isoformat()
 
+        # Guard against the requested month not having a published issue
+        # yet — e.g. if the 1st falls on a weekend and this runs before
+        # the actual publish date (the first business day). We can't
+        # confirm from the live page whether MAS cleanly shows "no data"
+        # in that case or silently falls back to the last published
+        # (previous month's) issue instead, so check explicitly: if the
+        # issue's real Issue Date isn't in the requested year/month, this
+        # isn't this month's issue — treat it the same as "not published
+        # yet" (return None) rather than risk confusing a stale issue for
+        # a new one. Note this doesn't lose data either way: the previous
+        # issue is already stored under its own correct date from whenever
+        # it was actually fetched, so skipping here just avoids redundant,
+        # potentially misleading log noise, not any real data.
+        try:
+            parsed = datetime.strptime(issue_date_str, "%d %B %Y").date()
+            if (parsed.year, parsed.month) != (year, month):
+                log(f"SSB rates: requested {year}-{month:02d}, but MAS returned "
+                    f"an issue dated {issue_date_iso} instead — likely because "
+                    f"{year}-{month:02d}'s issue isn't published yet (e.g. the "
+                    f"1st fell on a weekend). Not treating this as this month's "
+                    f"issue; existing history is unaffected.")
+                return None
+        except ValueError:
+            pass  # already logged/handled via issue_date_iso's fallback above
+
         record = {
             "date": issue_date_iso,
             "issue_code": meta.get("Issue Code", ""),
