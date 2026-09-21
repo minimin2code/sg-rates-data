@@ -47,6 +47,7 @@ WHAT TO CHECK / MAINTAIN
   stretch.
 """
 
+import csv
 import json
 import os
 import re
@@ -67,6 +68,25 @@ MAS_SORA_API_URL = (
 MAS_SGS_PRICES_URL = "https://eservices.mas.gov.sg/statistics/fdanet/SgsBenchmarkIssuePrices.aspx"
 
 _DATE_ROW_RE = re.compile(r"^\d{2} \w{3} \d{4}$")
+
+# One-time historical backfill for SGS 2Y/10Y, since MAS's live page only
+# ever shows the trailing ~1 week (see fetch_sgs_yields_from_mas_page) and
+# there's no API endpoint for this series (see module docstring). If a
+# file named SGS_BACKFILL_CSV_FILENAME exists in this repo (export it from
+# MAS's "SGS Prices and Yields - Benchmark Issues" historical download —
+# same multi-block CSV format MAS uses, with year/month cells blank on
+# every row after the first for that year/month), main() will parse it and
+# merge it in on every run. This is safe to leave in the repo permanently:
+# SGS_BACKFILL_CUTOFF is a fixed historical date, so it can never clobber
+# a live-scraped date newer than that, and merge_records is idempotent —
+# re-parsing the same CSV every day just re-merges identical records.
+SGS_BACKFILL_CSV_FILENAME = "sgs_historical_backfill.csv"
+SGS_BACKFILL_CSV_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), SGS_BACKFILL_CSV_FILENAME
+)
+SGS_BACKFILL_CUTOFF = date(2026, 9, 3)  # inclusive; live scrape owns everything after this
+SGS_BACKFILL_YEARS = 10
+SGS_BACKFILL_START = SGS_BACKFILL_CUTOFF.replace(year=SGS_BACKFILL_CUTOFF.year - SGS_BACKFILL_YEARS)
 
 # Manually-curated fallback VALUES, used only when the SGS page scrape
 # returns nothing (page down, redesigned, etc). The "date" here is just
@@ -239,6 +259,77 @@ def fetch_sgs_yields_from_mas_page():
         return [], []
 
 
+def parse_sgs_backfill_csv(path):
+    """Parses MAS's "SGS Prices and Yields - Benchmark Issues" historical
+    export CSV into {date, value, source: "csv_backfill"} records for the
+    2Y and 10Y columns, restricted to [SGS_BACKFILL_START, SGS_BACKFILL_
+    CUTOFF] inclusive.
+
+    File format quirks this handles:
+    - The file is several year-blocks concatenated, each with its own
+      repeated header row ("...,Average Buying Rates of Govt Securities
+      Dealers 2-Year Bond Yield,...10-Year Bond Yield") and footnote block
+      in between. Both are skipped naturally: header rows have an empty
+      day/value cell (only text in the yield-label columns) and footnote
+      rows have far fewer/more columns, so a row only becomes a data row
+      when the day column parses as an int AND both yield columns parse
+      as floats.
+    - Year and Month are given only on the FIRST row for that year/month
+      — every subsequent row leaves those two columns blank and relies on
+      carrying the last-seen value forward (e.g. "2015,Sep,01,..." then
+      ",,02,...", ",,03,..."). This parser tracks current_year/
+      current_month across rows to reconstruct the full date for every
+      row.
+    - Confirmed against the actual export: 2,510 trading days parsed for
+      2016-09-05 through 2026-09-03 with zero parse errors and zero
+      duplicate dates.
+    """
+    records_2y, records_10y = [], []
+    current_year = None
+    current_month = None
+
+    with open(path, newline="", encoding="utf-8-sig") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            row = [c.strip() for c in row]
+            if len(row) < 5:
+                continue
+
+            if row[0]:
+                if re.fullmatch(r"\d{4}", row[0]):
+                    current_year = int(row[0])
+                else:
+                    # A title row (e.g. "SGS Prices and Yields..."), not a
+                    # year — not a data row either way.
+                    continue
+            if row[1]:
+                current_month = row[1]
+
+            day_str, y2_str, y10_str = row[2], row[3], row[4]
+            if not day_str or not y2_str or not y10_str:
+                continue
+            if current_year is None or current_month is None:
+                continue
+
+            try:
+                day = int(day_str)
+                y2 = float(y2_str)
+                y10 = float(y10_str)
+                d = datetime.strptime(f"{day} {current_month} {current_year}", "%d %b %Y").date()
+            except ValueError:
+                continue  # header/footnote row that happened to have 5+ columns
+
+            if not (SGS_BACKFILL_START <= d <= SGS_BACKFILL_CUTOFF):
+                continue
+
+            iso = d.isoformat()
+            records_2y.append({"date": iso, "value": y2, "source": "csv_backfill"})
+            records_10y.append({"date": iso, "value": y10, "source": "csv_backfill"})
+
+    return records_2y, records_10y
+
+
+
 def apply_manual_override(key, live_records, existing_records):
     """If the live fetch produced nothing, decide what (if anything) to
     write for today:
@@ -283,6 +374,15 @@ def main():
         log("SORA: no live records obtained this run (keeping existing history, if any)")
 
     log("Fetching SGS 2Y / 10Y yields...")
+
+    if os.path.exists(SGS_BACKFILL_CSV_PATH):
+        backfill_2y, backfill_10y = parse_sgs_backfill_csv(SGS_BACKFILL_CSV_PATH)
+        log(f"SGS backfill CSV found: merging {len(backfill_2y)} historical "
+            f"points per series ({SGS_BACKFILL_START.isoformat()} to "
+            f"{SGS_BACKFILL_CUTOFF.isoformat()})")
+        data["series"]["sgs_2y"] = merge_records(data["series"]["sgs_2y"], backfill_2y)
+        data["series"]["sgs_10y"] = merge_records(data["series"]["sgs_10y"], backfill_10y)
+
     sgs_2y_records, sgs_10y_records = fetch_sgs_yields_from_mas_page()
     sgs_2y_records = apply_manual_override("sgs_2y", sgs_2y_records, data["series"]["sgs_2y"])
     sgs_10y_records = apply_manual_override("sgs_10y", sgs_10y_records, data["series"]["sgs_10y"])
@@ -308,3 +408,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
