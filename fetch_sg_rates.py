@@ -66,6 +66,7 @@ MAS_SORA_API_URL = (
     "domestic_interest_rates_daily/views/domestic_interest_rates_daily"
 )
 MAS_SGS_PRICES_URL = "https://eservices.mas.gov.sg/statistics/fdanet/SgsBenchmarkIssuePrices.aspx"
+MAS_SSB_URL = "https://eservices.mas.gov.sg/statistics/fdanet/StepUpInterest.aspx"
 
 _DATE_ROW_RE = re.compile(r"^\d{2} \w{3} \d{4}$")
 
@@ -115,7 +116,7 @@ def load_existing():
     if os.path.exists(OUTPUT_PATH):
         with open(OUTPUT_PATH, "r") as f:
             return json.load(f)
-    return {"updated_at": None, "series": {"sora": [], "sgs_2y": [], "sgs_10y": []}}
+    return {"updated_at": None, "series": {"sora": [], "sgs_2y": [], "sgs_10y": [], "ssb_rates": []}}
 
 
 def merge_records(existing_list, new_records):
@@ -259,6 +260,147 @@ def fetch_sgs_yields_from_mas_page():
         return [], []
 
 
+def fetch_ssb_rates_from_mas_page(year=None, month=None):
+    """Fetches the Singapore Savings Bond (SSB) step-up interest rate
+    table (Year 1 through 10) for a given year/month's issue — defaults
+    to today's year/month, which is exactly the "current month's issue"
+    behavior requested: if this runs in October, it naturally asks for
+    October's issue instead of September's, since it just reads today's
+    date rather than anything hardcoded.
+
+    Unlike fetch_sgs_yields_from_mas_page (a plain GET that returns
+    server-rendered HTML directly), this page is classic ASP.NET WebForms:
+    selecting Year + Month and clicking "Display" POSTs back to the SAME
+    URL, carrying forward hidden __VIEWSTATE / __VIEWSTATEGENERATOR /
+    __EVENTVALIDATION tokens from whatever page you're currently on. Those
+    tokens are per-request and expire, so this always does a fresh GET
+    first to obtain a live set, then POSTs with the selected year/month —
+    exactly mirroring what a browser does, just without a person clicking.
+    No Issue Code is submitted (left blank), matching the confirmed
+    real-world flow: selecting only Year + Month and clicking Display
+    returns that month's single issue directly.
+
+    Field names and result HTML structure below were confirmed against a
+    real page load+submission (View Page Source of both the query form
+    and the results), not guessed:
+    - Query form: ctl00$ContentPlaceHolder1$StartYearDropDownList (e.g.
+      "2026"), ...StartMonthDropDownList (1-12, "13" = ALL — not used
+      here), ...IssueCodeTextBox (left blank), and the submit button
+      itself must be included as ...DisplayButton: "Display" (a plain
+      <input type="submit">, not an __EVENTTARGET-style postback, so no
+      __EVENTTARGET/__EVENTARGUMENT fields are needed).
+    - Results: a <table class="setupInterest-table"> with 3 rows — a
+      header (blank cell + "1".."10") then "Interest,%" and "Average p.a.
+      return, %**" data rows, 10 percentage cells each. A separate small
+      2-column metadata table above it carries Issue Code, ISIN Code,
+      Issue Date, Coupon Dates, and Maturity Date labels/values.
+    """
+    if year is None or month is None:
+        today = date.today()
+        year, month = today.year, today.month
+
+    session = requests.Session()
+    session.headers.update(HEADERS)
+
+    try:
+        res = session.get(MAS_SSB_URL, timeout=20)
+        if res.status_code != 200:
+            log(f"SSB rates: HTTP {res.status_code} fetching query form")
+            return None
+
+        soup = BeautifulSoup(res.text, "html.parser")
+
+        def hidden_value(name):
+            tag = soup.find("input", {"name": name})
+            return tag["value"] if tag and tag.has_attr("value") else ""
+
+        view_state = hidden_value("__VIEWSTATE")
+        if not view_state:
+            log("SSB rates: could not find __VIEWSTATE on the query form — "
+                "page structure may have changed")
+            return None
+
+        payload = {
+            "__VIEWSTATE": view_state,
+            "__VIEWSTATEGENERATOR": hidden_value("__VIEWSTATEGENERATOR"),
+            "__EVENTVALIDATION": hidden_value("__EVENTVALIDATION"),
+            "ctl00$ContentPlaceHolder1$StartYearDropDownList": str(year),
+            "ctl00$ContentPlaceHolder1$StartMonthDropDownList": str(month),
+            "ctl00$ContentPlaceHolder1$IssueCodeTextBox": "",
+            "ctl00$ContentPlaceHolder1$DisplayButton": "Display",
+        }
+
+        res2 = session.post(MAS_SSB_URL, data=payload, timeout=20)
+        if res2.status_code != 200:
+            log(f"SSB rates: HTTP {res2.status_code} on Display postback")
+            return None
+
+        soup2 = BeautifulSoup(res2.text, "html.parser")
+
+        results_table = soup2.find("table", class_="setupInterest-table")
+        if results_table is None:
+            log(f"SSB rates: no results table for {year}-{month:02d} — "
+                f"either no issue exists for this month yet, or the page "
+                f"structure changed")
+            return None
+
+        rows = results_table.find_all("tr")
+        if len(rows) < 3:
+            log(f"SSB rates: results table for {year}-{month:02d} has "
+                f"{len(rows)} rows, expected 3 — page layout may have changed")
+            return None
+
+        interest_cells = rows[1].find_all("td")[1:]
+        avg_cells = rows[2].find_all("td")[1:]
+        if len(interest_cells) != 10 or len(avg_cells) != 10:
+            log(f"SSB rates: expected 10 year-columns for {year}-{month:02d}, "
+                f"got {len(interest_cells)}/{len(avg_cells)} — page layout "
+                f"may have changed")
+            return None
+
+        try:
+            interest_rates = [float(c.get_text(strip=True).rstrip("%")) for c in interest_cells]
+            avg_returns = [float(c.get_text(strip=True).rstrip("%")) for c in avg_cells]
+        except ValueError as e:
+            log(f"SSB rates: couldn't parse rate cells for {year}-{month:02d}: {e}")
+            return None
+
+        # Small metadata table above the rates: Issue Code, ISIN Code,
+        # Issue Date, Coupon Dates, Maturity Date — each its own 2-cell row.
+        meta = {}
+        for row in soup2.select("table tr"):
+            cells = row.find_all("td")
+            if len(cells) == 2:
+                label = cells[0].get_text(strip=True).rstrip(":*")
+                meta[label] = cells[1].get_text(strip=True)
+
+        issue_date_str = meta.get("Issue Date", "")
+        try:
+            issue_date_iso = datetime.strptime(issue_date_str, "%d %B %Y").date().isoformat()
+        except ValueError:
+            # Fall back to the 1st of the requested month if the metadata
+            # table's date format ever changes — still dedupes/sorts sanely.
+            issue_date_iso = date(year, month, 1).isoformat()
+
+        record = {
+            "date": issue_date_iso,
+            "issue_code": meta.get("Issue Code", ""),
+            "isin_code": meta.get("ISIN Code", ""),
+            "maturity_date": meta.get("Maturity Date", ""),
+            "interest_rates": interest_rates,
+            "average_pa_return": avg_returns,
+            "source": "mas_page_scrape",
+        }
+        log(f"SSB rates: fetched issue {record['issue_code'] or '(unknown)'} "
+            f"for {year}-{month:02d}")
+        return record
+
+    except requests.exceptions.RequestException as e:
+        log(f"SSB rates: {type(e).__name__}: {e}")
+        return None
+
+
+
 def parse_sgs_backfill_csv(path):
     """Parses MAS's "SGS Prices and Yields - Benchmark Issues" historical
     export CSV into {date, value, source: "csv_backfill"} records for the
@@ -365,6 +507,9 @@ def apply_manual_override(key, live_records, existing_records):
 
 def main():
     data = load_existing()
+    # Existing sg_rates.json files from before this series existed won't
+    # have this key — add it so later code can assume it's always present.
+    data["series"].setdefault("ssb_rates", [])
 
     log("Fetching SORA...")
     sora_records = fetch_sora_from_mas_api_catalog()
@@ -389,6 +534,13 @@ def main():
     data["series"]["sgs_2y"] = merge_records(data["series"]["sgs_2y"], sgs_2y_records)
     data["series"]["sgs_10y"] = merge_records(data["series"]["sgs_10y"], sgs_10y_records)
 
+    log("Fetching SSB interest rates...")
+    ssb_record = fetch_ssb_rates_from_mas_page()
+    if ssb_record:
+        data["series"]["ssb_rates"] = merge_records(data["series"]["ssb_rates"], [ssb_record])
+    else:
+        log("SSB rates: no live record obtained this run (keeping existing history, if any)")
+
     data["updated_at"] = datetime.now(timezone.utc).isoformat()
 
     with open(OUTPUT_PATH, "w") as f:
@@ -397,7 +549,8 @@ def main():
     log(f"Wrote {OUTPUT_PATH}: "
         f"sora={len(data['series']['sora'])} pts, "
         f"sgs_2y={len(data['series']['sgs_2y'])} pts, "
-        f"sgs_10y={len(data['series']['sgs_10y'])} pts")
+        f"sgs_10y={len(data['series']['sgs_10y'])} pts, "
+        f"ssb_rates={len(data['series']['ssb_rates'])} issues")
 
     # Fail the Action loudly if EVERYTHING came back empty (helps catch a
     # total outage rather than silently committing an empty file forever)
