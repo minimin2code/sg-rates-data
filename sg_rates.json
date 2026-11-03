@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-02T07:58:36.364089+00:00",
+  "updated_at": "2026-11-03T08:19:26.231869+00:00",
   "series": {
     "sora": [
       {
@@ -12730,6 +12730,11 @@
       {
         "date": "2026-10-30",
         "value": 1.5526,
+        "source": "mas_api"
+      },
+      {
+        "date": "2026-11-02",
+        "value": 1.416,
         "source": "mas_api"
       }
     ],
@@ -25573,6 +25578,11 @@
         "date": "2026-10-30",
         "value": 1.87,
         "source": "mas_page_scrape"
+      },
+      {
+        "date": "2026-11-02",
+        "value": 1.86,
+        "source": "mas_page_scrape"
       }
     ],
     "sgs_10y": [
@@ -38415,6 +38425,11 @@
         "date": "2026-10-30",
         "value": 2.24,
         "source": "mas_page_scrape"
+      },
+      {
+        "date": "2026-11-02",
+        "value": 2.23,
+        "source": "mas_page_scrape"
       }
     ],
     "ssb_rates": [
@@ -38508,6 +38523,37 @@
           2.33,
           2.39,
           2.45
+        ],
+        "source": "mas_page_scrape"
+      },
+      {
+        "date": "2026-12-01",
+        "issue_code": "GX26120A",
+        "isin_code": "SGXZ81625576",
+        "maturity_date": "1 December 2036",
+        "interest_rates": [
+          1.83,
+          1.99,
+          2.17,
+          2.35,
+          2.47,
+          2.52,
+          2.57,
+          2.63,
+          2.71,
+          2.83
+        ],
+        "average_pa_return": [
+          1.83,
+          1.91,
+          1.99,
+          2.08,
+          2.16,
+          2.21,
+          2.26,
+          2.3,
+          2.34,
+          2.39
         ],
         "source": "mas_page_scrape"
       }
