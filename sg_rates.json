@@ -1,5 +1,5 @@
 {
-  "updated_at": "2026-11-20T08:53:56.411531+00:00",
+  "updated_at": "2026-11-21T08:35:54.384650+00:00",
   "series": {
     "sora": [
       {
@@ -25703,6 +25703,11 @@
         "date": "2026-11-19",
         "value": 1.98,
         "source": "mas_page_scrape"
+      },
+      {
+        "date": "2026-11-20",
+        "value": 1.98,
+        "source": "mas_page_scrape"
       }
     ],
     "sgs_10y": [
@@ -38609,6 +38614,11 @@
       {
         "date": "2026-11-19",
         "value": 2.28,
+        "source": "mas_page_scrape"
+      },
+      {
+        "date": "2026-11-20",
+        "value": 2.27,
         "source": "mas_page_scrape"
       }
     ],
